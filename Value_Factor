@@ -1,0 +1,205 @@
+"""Quant Finance: o fator Value (valor).
+Uma ação "de valor" tem preço baixo em relação ao valor contábil (price to book
+baixo). Os pesquisadores invertem a razão para book to market (B/M) e comparam
+as ações mais baratas (B/M alto) com as mais caras (B/M baixo).
+
+Mercado simulado: 500 ações, 30 anos, números assumidos. O modelo tem um prêmio
+de valor pequeno embutido: ele mostra como o MÉTODO funciona, não o que os
+mercados reais vão pagar. Os dados são simulados, material educacional.
+
+Requer: numpy e matplotlib.
+"""
+import os
+
+os.makedirs("graficos_value", exist_ok=True)
+
+#Passo 1: parâmetros
+import numpy as np
+
+rng = np.random.default_rng(332)
+n_acoes = 500
+anos = 30
+rf = 0.03
+premio_mercado = 0.05
+vol_mercado = 0.16
+vol_propria = 0.30          # risco próprio de cada ação (ao ano)
+premio_valor = 0.0129     # retorno por unidade de B/M padronizado
+premio_mom = 0.012       # retorno por unidade de momentum padronizado
+vol_fator_valor = 0.005     # o prêmio de valor oscila de ano para ano
+vol_fator_mom = 0.005
+corr_carac = -0.05          # B/M e momentum quase não se relacionam
+persist = 0.7               # B/M muda devagar: ação cara tende a continuar cara
+decil = n_acoes // 10       # 50 ações por decil
+
+#Passo 2: as características das ações
+# z_bm: B/M padronizado (log). Alto = ação barata (valor). Baixo = ação cara.
+z_bm = np.empty((anos, n_acoes))
+z_bm[0] = rng.standard_normal(n_acoes)
+for t in range(1, anos):
+    novo = rng.standard_normal(n_acoes)
+    z_bm[t] = persist * z_bm[t - 1] + np.sqrt(1 - persist**2) * novo
+
+# z_mom: momentum padronizado, quase independente do B/M
+z_mom = corr_carac * z_bm + np.sqrt(1 - corr_carac**2) * rng.standard_normal((anos, n_acoes))
+
+print("Formato de B/M (anos, ações):", z_bm.shape)
+
+#Passo 3: os retornos
+# retorno do ano t depende das características medidas no início do ano
+betas = rng.normal(1.0, 0.2, n_acoes)
+r_mercado = rng.normal(rf + premio_mercado, vol_mercado, anos)
+choque_v = rng.normal(0, vol_fator_valor, anos)
+choque_m = rng.normal(0, vol_fator_mom, anos)
+ruido = rng.normal(0, vol_propria, (anos, n_acoes))
+
+r_acoes = (rf + betas * (r_mercado[:, None] - rf)
+           + (premio_valor + choque_v)[:, None] * z_bm
+           + (premio_mom + choque_m)[:, None] * z_mom
+           + ruido)
+
+#Passo 4: ordenar em decis e montar as carteiras
+def retorno_decis(carac, r):
+    """Retorno médio de cada decil (0 = menor característica, 9 = maior)."""
+    saida = np.zeros((anos, 10))
+    for t in range(anos):
+        ordem = np.argsort(carac[t])
+        for d in range(10):
+            saida[t, d] = r[t, ordem[d * decil:(d + 1) * decil]].mean()
+    return saida
+
+dec_v = retorno_decis(z_bm, r_acoes)
+dec_m = retorno_decis(z_mom, r_acoes)
+
+valor = dec_v[:, 9]          # as 10% mais baratas (B/M alto)
+crescimento = dec_v[:, 0]    # as 10% mais caras (B/M baixo)
+long_short = valor - crescimento
+mom = dec_m[:, 9] - dec_m[:, 0]
+
+#Passo 5: o prêmio de valor e a estatística t
+def estat_t(x):
+    return x.mean() / (x.std(ddof=1) / np.sqrt(len(x)))
+
+print(f"Carteira valor:        {valor.mean():.1%} ao ano")
+print(f"Carteira crescimento:  {crescimento.mean():.1%} ao ano")
+print(f"Valor menos crescimento: {long_short.mean():.1%} ao ano")
+print(f"Estatística t: {estat_t(long_short):.2f}")
+
+#Gráfico 1: retorno médio por decil de B/M
+import matplotlib.pyplot as plt
+plt.style.use("dark_background")
+amarelo = "#FFDF00"
+
+plt.figure(figsize=(7, 4))
+cores_d = ["#4FC3F7"] + ["#9AA0A6"] * 8 + [amarelo]
+plt.bar(range(1, 11), dec_v.mean(axis=0) * 100, color=cores_d)
+plt.xticks(range(1, 11))
+plt.xlabel("Decil de book to market (1 = mais cara, 10 = mais barata)")
+plt.ylabel("Retorno médio (% ao ano)")
+plt.savefig("graficos_value/grafico1_decis.png", dpi=200,
+            bbox_inches="tight", facecolor="black")
+plt.show()
+
+#Passo 6: a riqueza de 30 anos
+W0 = 100
+t = np.arange(anos + 1)
+def riqueza(r):
+    return np.r_[W0, W0 * np.cumprod(1 + r)]
+
+#Gráfico 2: barato contra caro
+plt.figure(figsize=(7, 4))
+plt.plot(t, riqueza(valor), color=amarelo, lw=2.5, label="Valor (B/M alto)")
+plt.plot(t, riqueza(crescimento), color="#4FC3F7", label="Crescimento (B/M baixo)")
+plt.plot(t, riqueza(long_short), color="white", ls="--", label="Valor menos crescimento")
+plt.yscale("log")
+plt.xlabel("Anos")
+plt.ylabel("Riqueza (início = 100)")
+plt.legend()
+plt.savefig("graficos_value/grafico2_riqueza.png", dpi=200,
+            bbox_inches="tight", facecolor="black")
+plt.show()
+
+#Passo 7: o prêmio é estatisticamente real? (30 anos de uma vida só)
+erro_padrao = long_short.std(ddof=1) / np.sqrt(anos)
+print(f"Prêmio: {long_short.mean():.1%}  erro padrão: {erro_padrao:.1%}")
+print(f"Intervalo de 95%: [{long_short.mean() - 1.96 * erro_padrao:.1%}, "
+      f"{long_short.mean() + 1.96 * erro_padrao:.1%}]")
+
+#Gráfico 3: os 30 retornos anuais da carteira valor menos crescimento
+plt.figure(figsize=(7, 4))
+plt.bar(np.arange(1, anos + 1), long_short * 100,
+        color=[amarelo if x > 0 else "#4FC3F7" for x in long_short])
+plt.axhline(long_short.mean() * 100, color="white", ls="--")
+plt.xlabel("Ano")
+plt.ylabel("Valor menos crescimento (%)")
+plt.savefig("graficos_value/grafico3_anos.png", dpi=200,
+            bbox_inches="tight", facecolor="black")
+plt.show()
+
+#Passo 8: valor e momentum juntos
+corr = np.corrcoef(long_short, mom)[0, 1]
+mix = 0.5 * long_short + 0.5 * mom
+print(f"Momentum: {mom.mean():.1%} ao ano  vol {mom.std(ddof=1):.1%}")
+print(f"Valor:    {long_short.mean():.1%} ao ano  vol {long_short.std(ddof=1):.1%}")
+print(f"Correlação valor x momentum: {corr:.2f}")
+print(f"Mistura 50/50: {mix.mean():.1%} ao ano  vol {mix.std(ddof=1):.1%}")
+
+#Gráfico 4: a mistura é mais suave
+plt.figure(figsize=(7, 4))
+plt.plot(t, riqueza(long_short), color=amarelo, label="Valor")
+plt.plot(t, riqueza(mom), color="#4FC3F7", label="Momentum")
+plt.plot(t, riqueza(mix), color="white", lw=2.5, label="Mistura 50/50")
+plt.yscale("log")
+plt.xlabel("Anos")
+plt.ylabel("Riqueza (início = 100)")
+plt.legend()
+plt.savefig("graficos_value/grafico4_mistura.png", dpi=200,
+            bbox_inches="tight", facecolor="black")
+plt.show()
+
+#Gráfico 5: correlação e risco
+fig, (a, b) = plt.subplots(1, 2, figsize=(10, 4))
+a.scatter(long_short * 100, mom * 100, color=amarelo)
+a.set_xlabel("Valor (%)")
+a.set_ylabel("Momentum (%)")
+a.set_title(f"Correlação = {corr:.2f}")
+
+nomes = ["Valor", "Momentum", "Mistura"]
+vols = [long_short.std(ddof=1), mom.std(ddof=1), mix.std(ddof=1)]
+b.bar(nomes, np.array(vols) * 100, color=[amarelo, "#4FC3F7", "white"])
+b.set_ylabel("Volatilidade (% ao ano)")
+plt.savefig("graficos_value/grafico5_correlacao.png", dpi=200,
+            bbox_inches="tight", facecolor="black")
+plt.show()
+
+#Passo 9: e se fossem outros 30 anos? (5.000 mundos)
+def um_mundo(g):
+    zb = np.empty((anos, n_acoes))
+    zb[0] = g.standard_normal(n_acoes)
+    for k in range(1, anos):
+        zb[k] = persist * zb[k - 1] + np.sqrt(1 - persist**2) * g.standard_normal(n_acoes)
+    e = g.normal(0, vol_propria, (anos, n_acoes))
+    cv = g.normal(0, vol_fator_valor, anos)
+    r = (premio_valor + cv)[:, None] * zb + e
+    topo = np.zeros(anos); base = np.zeros(anos)
+    for k in range(anos):
+        o = np.argsort(zb[k])
+        topo[k] = r[k, o[-decil:]].mean()
+        base[k] = r[k, o[:decil]].mean()
+    return topo - base
+
+g = np.random.default_rng(1)
+ts = np.array([estat_t(um_mundo(g)) for _ in range(2000)])
+print(f"Estatística t média: {ts.mean():.2f}")
+print(f"Fração de mundos com t > 2: {(ts > 2).mean():.1%}")
+
+#Gráfico 6: a distribuição da estatística t
+plt.figure(figsize=(7, 4))
+plt.hist(ts, bins=40, color=amarelo, alpha=0.8)
+plt.axvline(2, color="white", ls="--", label="t = 2")
+plt.axvline(estat_t(long_short), color="#4FC3F7", lw=2, label="Nossa simulação")
+plt.xlabel("Estatística t do prêmio de valor")
+plt.yticks([])
+plt.legend()
+plt.savefig("graficos_value/grafico6_mundos.png", dpi=200,
+            bbox_inches="tight", facecolor="black")
+plt.show()
